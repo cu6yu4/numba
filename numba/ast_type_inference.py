@@ -1054,7 +1054,7 @@ class TypeInferer(visitors.NumbaTransformer, BuiltinResolverMixin,
         return isinstance(ctx, ast.Store)
 
     def _resolve_extension_attribute(self, node, type):
-        if attr not in type.symtab:
+        if node.attr not in type.symtab:
             if type.is_resolved or not self.is_store(node.ctx):
                 raise error.NumbaError(
                     node, "Cannot access attribute %s of type %s" % (
@@ -1062,7 +1062,7 @@ class TypeInferer(visitors.NumbaTransformer, BuiltinResolverMixin,
 
             # Create entry in type's symbol table, resolve the actual type
             # in the parent Assign node
-            type.symtab[attr] = Variable(None)
+            type.symtab[node.attr] = Variable(None)
 
         if self.is_store(node.ctx):
             cls = nodes.ExtTypeAttributeSet
@@ -1092,8 +1092,6 @@ class TypeInferer(visitors.NumbaTransformer, BuiltinResolverMixin,
             result_type = type.fielddict[node.attr]
         elif type.is_module and hasattr(type.module, node.attr):
             result_type = self._resolve_module_attribute(node, type)
-        elif type.is_object:
-            result_type = type
         elif type.is_array and node.attr in ('data', 'shape', 'strides', 'ndim'):
             # handle shape/strides/ndim etc
             return nodes.ArrayAttributeNode(node.attr, node.value)
@@ -1176,3 +1174,45 @@ class TypeSettingVisitor(visitors.NumbaVisitor):
         "Resolve deferred coercions"
         self.generic_visit(node)
         return nodes.CoercionNode(node.node, node.variable.type)
+
+
+def process_special(context, py_class, special_name, ext_type):
+    from numba import pipeline
+
+    special_method = vars(py_class).get(special_name, None)
+    if special_method is not None:
+        argtypes = [ext_type]
+        argtypes.extend([object_] * (special_method.func_code.co_argcount -1))
+        pipeline.infer_types(context, special_method,
+                             restype=object_, argtypes=argtypes,
+                             symtab={'self': ext_type})
+
+def compile_extension_methods(context, py_class, ext_type):
+    # TODO: populate ext_type.methods
+    # TODO: compile methods
+    # TODO: insert wrappers in py_class.__dict__
+    method_pointers = []
+    lmethods = []
+    return method_pointers, lmethods
+
+def create_descr(attr_name):
+    def _get(self):
+        return getattr(self._numba_attrs, attr_name)
+    def _set(self, value):
+        return setattr(self._numba_attrs, attr_name, value)
+    return property(_get, _set)
+
+def inject_descriptors(context, py_class, ext_type):
+    for attr_name, attr_type in ext_type.symtab.iteritems():
+        descriptor = create_descr(attr_name)
+        setattr(py_class, attr_name, descriptor)
+
+def infer_exttype_types(context, py_class):
+    type = numba_types.ExtensionType(py_class)
+    # TODO: keep specialized AST
+    process_special(context, py_class, '__new__', type)
+    process_special(context, py_class, '__init__', type)
+    method_pointers, lmethods = compile_extension_methods(context, py_class,
+                                                          type)
+    inject_descriptors(context, py_class, type)
+    return type, method_pointers, lmethods

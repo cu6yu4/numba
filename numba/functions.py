@@ -129,12 +129,12 @@ class FunctionCache(object):
 
                 func = getattr(func, '_numba_func', func)
                 # numba function, compile
-                func_signature, lfunc, ctypes_func = pipeline.compile(
+                func_signature, translator, ctypes_func = pipeline.compile(
                                 self.context, func, restype, argtypes,
                                 ctypes=ctypes, **kwds)
                 self.compiled_functions[func, tuple(func_signature.args)] = (
-                                            func_signature, lfunc, ctypes_func)
-                return func_signature, lfunc, ctypes_func
+                                      func_signature, translator, ctypes_func)
+                return func_signature, translator.lfunc, ctypes_func
 
         # print func, getattr(func, '_is_numba_func', False)
         # create a signature taking N objects and returning an object

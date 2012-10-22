@@ -1064,12 +1064,7 @@ class TypeInferer(visitors.NumbaTransformer, BuiltinResolverMixin,
             # in the parent Assign node
             type.symtab[node.attr] = Variable(None)
 
-        if self.is_store(node.ctx):
-            cls = nodes.ExtTypeAttributeSet
-        else:
-            cls = nodes.ExtTypeAttribute
-
-        return cls(node.value, node.attr, type)
+        return nodes.ExtTypeAttribute(node.value, node.attr, node.ctx, type)
 
     def visit_Attribute(self, node):
         node.value = self.visit(node.value)
@@ -1089,7 +1084,15 @@ class TypeInferer(visitors.NumbaTransformer, BuiltinResolverMixin,
             if not node.attr in type.fielddict:
                 raise error.NumbaError(
                         node, "Struct %s has no field %r" % (type, node.attr))
-            result_type = type.fielddict[node.attr]
+            if isinstance(node.ctx, ast.Store):
+                if not isinstance(node.value, (ast.Name, ast.Subscript)):
+                    raise error.NumbaError(
+                            node, "Can only assign to struct attributes of "
+                                  "variables or array indices")
+                node.value.ctx = ast.Store()
+
+            return nodes.StructAttribute(node.value, node.attr, node.ctx,
+                                         node.value.variable.type)
         elif type.is_module and hasattr(type.module, node.attr):
             result_type = self._resolve_module_attribute(node, type)
         elif type.is_array and node.attr in ('data', 'shape', 'strides', 'ndim'):
@@ -1176,26 +1179,65 @@ class TypeSettingVisitor(visitors.NumbaVisitor):
         return nodes.CoercionNode(node.node, node.variable.type)
 
 
-def process_special(context, py_class, special_name, ext_type):
-    from numba import pipeline
+def validate_method(py_func, sig):
+    if isinstance(py_func, types.FunctionType):
+        nargs = py_func.func_code.co_argcount - 1
+        if len(sig.args) != nargs:
+            raise error.NumbaError(
+                "Expected %d argument types (don't include 'self')" % nargs)
 
-    special_method = vars(py_class).get(special_name, None)
-    if special_method is not None:
-        argtypes = [ext_type]
-        argtypes.extend([object_] * (special_method.func_code.co_argcount -1))
-        pipeline.infer_types(context, special_method,
-                             restype=object_, argtypes=argtypes,
-                             symtab={'self': ext_type})
+
+def process_method(ext_type, method, py_class,
+                   is_static=False, is_class=False):
+    if isinstance(method, minitypes.Function):
+        # @double(...)
+        # def func(self, ...): ...
+        sig = method.signature
+        validate_method(method.py_func, sig)
+        argtypes = (ext_type,) + sig.args
+        restype = sig.return_type
+        method = method.py_func
+    elif isinstance(method, types.FunctionType):
+        validate_method(method, object_())
+        restype, argtypes = None, (ext_type,)
+    elif isinstance(method, staticmethod):
+        return process_method(ext_type, method.__func__, py_class,
+                              is_static=True)
+    elif isinstance(method, classmethod):
+        return process_method(ext_type, method.__func__, py_class,
+                              is_class=True)
+    else:
+        return None, None, None
+
+    return method, restype, argtypes
 
 def compile_extension_methods(context, py_class, ext_type):
-    # TODO: populate ext_type.methods
-    # TODO: compile methods
-    # TODO: insert wrappers in py_class.__dict__
+    from numba import pipeline
+
     method_pointers = []
     lmethods = []
+
+    restype = None
+    argtypes = (ext_type,)
+    for method_name, method in vars(py_class).iteritems():
+        if method_name in ('__new__', '__init__'):
+            continue
+
+        method, restype, argtypes = process_method(ext_type, method, py_class)
+        if method is None:
+            continue
+
+        setattr(py_class, method_name, method)
+        method.live_objects = []
+        func_signature, translator, wrapper = pipeline.compile(
+                                    context, method, restype, argtypes)
+        ext_type.methods.append((method_name, func_signature))
+        lmethods.append(translator.lfunc)
+        method_pointers.append(translator.lfunc_pointer)
+
     return method_pointers, lmethods
 
-def create_descr(attr_name):
+def _create_descr(attr_name):
     def _get(self):
         return getattr(self._numba_attrs, attr_name)
     def _set(self, value):
@@ -1204,15 +1246,49 @@ def create_descr(attr_name):
 
 def inject_descriptors(context, py_class, ext_type):
     for attr_name, attr_type in ext_type.symtab.iteritems():
-        descriptor = create_descr(attr_name)
+        descriptor = _create_descr(attr_name)
         setattr(py_class, attr_name, descriptor)
+
+def infer_attribute_types(context, py_class, special_name, ext_type):
+    from numba import pipeline
+
+    special_method = vars(py_class).get(special_name, None)
+    if special_method is not None:
+        if isinstance(special_method, minitypes.Function):
+            special_method, restype, argtypes = process_method(
+                            ext_type, special_method, py_class)
+            setattr(py_class, special_name, special_method)
+        else:
+            argtypes = [ext_type]
+            argtypes.extend([object_] * (special_method.func_code.co_argcount -1))
+
+        pipeline.infer_types(context, special_method,
+                             restype=object_, argtypes=argtypes,
+                             symtab={'self': ext_type})
+
 
 def infer_exttype_types(context, py_class):
     type = numba_types.ExtensionType(py_class)
-    # TODO: keep specialized AST
-    process_special(context, py_class, '__new__', type)
-    process_special(context, py_class, '__init__', type)
+    # Capture native extension attributes from __init__
+    # infer_attribute_types(context, py_class, '__new__', type)
+    infer_attribute_types(context, py_class, '__init__', type)
+
+    # Update native attributes before compiling methods
+    attrs = dict((name, var.type) for name, var in type.symtab.iteritems())
+    type.attribute_struct = struct(**attrs)
+
     method_pointers, lmethods = compile_extension_methods(context, py_class,
                                                           type)
+    type.vtab_type = struct(type.methods)
+
     inject_descriptors(context, py_class, type)
     return type, method_pointers, lmethods
+
+def create_extension(context, py_class, translator_kwargs):
+    type, method_pointers, lmethods = infer_exttype_types(
+                                                context, py_class)
+    extension_type = extension_types.create_new_extension_type(
+            py_class.__name__, py_class.__bases__, dict(vars(py_class)),
+            type.attribute_struct, type.vtab_type,
+            lmethods, method_pointers)
+    return extension_type

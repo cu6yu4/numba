@@ -187,6 +187,14 @@ class LLVMContextManager(object):
 
     def link(self, lfunc):
         if lfunc.module is not self.module:
+#            print '='*80
+#            print lfunc.name
+#            print "MODULEEEEEEEEEE"
+#            print lfunc.module
+#            print "END MODULEEEEEEEEEE"
+#            for f in lfunc.module.functions:
+#                print f.name
+#            print 'fiodjfiojasfojioadj'
             # optimize
             self.pass_manager.run(lfunc.module)
             # link module
@@ -235,11 +243,18 @@ class LLVMContextManager(object):
                         # We assume this is a utility function.
                         assert func.linkage == lc.LINKAGE_LINKONCE_ODR, func.name
 
+#            lfunc_module.get_function_named(func_name)
+#            self.module.get_or_insert_function(lfunc.type.pointee, func_name)
+            print lfunc
+            lfunc_module.verify()
+            self.module.verify()
             self.module.link_in(lfunc_module, preserve=False)
 #
 #            print 'linked'.center(80, '=')
 #            print self.module
-
+#            print func_name
+#            for f in self.module.functions:
+#                print f.name
             lfunc = self.module.get_function_named(func_name)
 
         assert lfunc.module is self.module

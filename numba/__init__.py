@@ -60,9 +60,6 @@ from numba.tests.test_support import testmod
 
 EXCLUDE_TEST_PACKAGES = ["bytecode"]
 
-def split_path(path):
-    return path.split(os.sep)
-
 def exclude_package_dirs(dirs):
     for exclude_pkg in EXCLUDE_TEST_PACKAGES:
         if exclude_pkg in dirs:
@@ -113,7 +110,7 @@ def test(whitelist=None, blacklist=None):
 
                 if not whitelist_match(whitelist, modname):
                     continue
-                if whitelist_match(blacklist, modname):
+                if blacklist and whitelist_match(blacklist, modname):
                     continue
 
                 run += 1
@@ -130,6 +127,10 @@ def test(whitelist=None, blacklist=None):
                                                 process.returncode)
                     print out, err
                     print "-" * 80
+
+                run += 1
+                res = call([sys.executable, '-m', qname + modname])
+                if res != 0:
                     failed += 1
 
     print "ran test files: failed: (%d/%d)" % (failed, run)

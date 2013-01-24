@@ -755,7 +755,15 @@ class Py_ssize_t_Type(IntType):
 
     def __init__(self, **kwds):
         super(Py_ssize_t_Type, self).__init__(**kwds)
-        self.itemsize = getsize('c_ssize_t', _plat_bits // 8)
+        if sys.version_info[:2] <= (2, 6):
+            # Problem: ctypes.c_ssize_t does not exist.
+            #
+            # According to PEP 353, Py_ssize_t has the same size of size_t.
+            # Thus, we can use c_size_t as a substitution for c_ssize_t.
+            typename = 'c_size_t'
+        else:
+            typename = 'c_ssize_t'
+        self.itemsize = getsize(typename, _plat_bits // 8)
 
 class NPyIntp(IntType):
     is_numpy_intp = True
